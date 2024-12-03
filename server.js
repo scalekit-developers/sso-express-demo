@@ -2,6 +2,8 @@ import 'dotenv/config';
 import express from 'express';
 import session from 'express-session';
 import bcrypt from 'bcryptjs';
+import { Scalekit } from '@scalekit-sdk/node';
+import jwt from 'jsonwebtoken';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
@@ -9,6 +11,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const app = express();
+
+const redirectUri = 'http://localhost:3001/callback';
+
+const scalekit = new Scalekit(
+  process.env.SCALEKIT_ENV_URL,
+  process.env.SCALEKIT_CLIENT_ID,
+  process.env.SCALEKIT_CLIENT_SECRET
+);
+console.log('ScaleKit initialized successfully');
 
 // Mock user data (replace with database in production)
 const users = [
@@ -82,8 +93,34 @@ app.post('/login', async (req, res) => {
 });
 
 app.get('/profile', isAuthenticated, (req, res) => {
-  const user = users.find((user) => user.id === req.session.user.id);
-  res.render('profile', { user });
+  // First try to find user in our users array
+  let user = users.find((user) => user.id === req.session.user.id);
+
+  // If user not found in array but we have session data (SSO case)
+  if (!user && req.session.user) {
+    user = {
+      id: req.session.user.id,
+      name: req.session.user.name,
+      email: req.session.user.email,
+      username: req.session.user.username,
+    };
+  }
+
+  // Get the decoded idToken if it exists
+  let decodedToken = null;
+  if (req.session.idToken) {
+    try {
+      decodedToken = jwt.decode(req.session.idToken);
+      console.log('Decoded token:', decodedToken);
+    } catch (error) {
+      console.error('Error decoding token:', error);
+    }
+  }
+
+  res.render('profile', {
+    user,
+    idToken: decodedToken,
+  });
 });
 
 app.get('/logout', (req, res) => {
@@ -93,25 +130,63 @@ app.get('/logout', (req, res) => {
 });
 
 app.get('/sso-login', (req, res) => {
-  if (process.env.SSO_ENABLED !== 'true') {
-    res.redirect('/login');
-    return;
-  }
   res.render('sso-login', { error: null });
 });
 
 app.post('/sso-login', (req, res) => {
-  if (process.env.SSO_ENABLED !== 'true') {
-    res.redirect('/login');
+  const { email } = req.body;
+  let [, domain] = email.split('@');
+  let options = Object.create({});
+  options['loginHint'] = email;
+
+  try {
+    const authorizationUrl = scalekit.getAuthorizationUrl(redirectUri, options);
+    // Redirect the user to the authorization URL
+    res.redirect(authorizationUrl);
+  } catch (error) {
+    console.error('SSO login error:', error);
+    res.render('sso-login', {
+      error: 'An error occurred while initiating SSO login',
+    });
+  }
+});
+
+app.get('/callback', async (req, res) => {
+  const { code, error, error_description } = req.query;
+
+  if (error) {
+    console.error('SSO callback error:', error, error_description);
+    res.render('login', {
+      error: `SSO login failed: ${error_description || error}`,
+    });
     return;
   }
 
-  const { email } = req.body;
-  const [, domain] = email.split('@');
+  try {
+    // Get tokens from ScaleKit
+    const { user, idToken } = await scalekit.authenticateWithCode(
+      code,
+      redirectUri
+    );
 
-  res.render('sso-login', {
-    error: `SSO login is not implemented in this demo. Domain ${domain} is allowed for SSO.`,
-  });
+    // Store user info in session
+    req.session.user = {
+      id: user.id,
+      email: user.email,
+      username: user.username,
+      name: `${user.givenName} ${user.familyName}`,
+    };
+
+    // Store idToken separately in session
+    req.session.idToken = idToken;
+
+    res.redirect('/profile');
+  } catch (error) {
+    console.error('Token exchange error:', error);
+    res.render('login', {
+      error: 'Failed to complete SSO login. Please try again.',
+    });
+  }
 });
 
 const PORT = process.env.PORT ?? 3000;
