@@ -1,4 +1,4 @@
-# Single Sign On Example App with Scalekit
+# Single Sign On example app with Scalekit
 
 A simple web application demonstrating Single Sign-On (SSO) authentication using Scalekit, Node.js, Express, and Tailwind CSS. This example shows how to implement secure authentication flows using Scalekit's SSO service.
 
